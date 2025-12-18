@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TapTrials Full</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/framer-motion/dist/framer-motion.umd.js"></script>
+<script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.3.3/dist/tailwind.min.css" rel="stylesheet">
+<style>
+body { margin: 0; background: #0a0a0f; color: white; font-family: sans-serif; overflow-x: hidden; }
+.floating { position: absolute; font-weight: bold; pointer-events: none; animation: floatUp 1s forwards; font-size:1.2rem;}
+@keyframes floatUp { 0% { opacity:1; transform: translateY(0px); } 100% { opacity:0; transform: translateY(-50px); } }
+.shake { animation: shake 0.1s; }
+@keyframes shake { 0% { transform: translateX(-2px);} 25% { transform: translateX(2px);} 50% { transform: translateX(-2px);} 75% { transform: translateX(2px);} 100% { transform: translateX(0);} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+
+const { useState, useEffect, useCallback, useRef } = React;
+const { motion, AnimatePresence } = window['framer-motion'];
+
+const INITIAL_STATE = {
+  power: 0,
+  totalPower: 0,
+  focus: 100,
+  maxFocus: 100,
+  focusRegen: 2,
+  tapPower: 1,
+  autoPower: 0,
+  critChance: 5,
+  critMultiplier: 2,
+  currentTrial: 1,
+  trialProgress: 0,
+  resets: 0,
+  resetPoints: 0,
+  totalResets: 0,
+  hardcoreMode: false,
+  trialsBeyondMode: false,
+  currentModifiers: [],
+  totalTaps: 0,
+  totalCrits: 0,
+  highestTrial: 1,
+  upgrades: {},
+  achievements: [],
+  lastOnline: Date.now(),
+};
+
+const UPGRADE_LIST = [
+  {id:'tapPower',name:'Tap Power',type:'tapPower',effect:1,cost:10},
+  {id:'autoPower',name:'Auto Power',type:'autoPower',effect:0.5,cost:20},
+  {id:'critChance',name:'Crit Chance',type:'critChance',effect:5,cost:30},
+  {id:'critMultiplier',name:'Crit Multiplier',type:'critMultiplier',effect:0.5,cost:50},
+  {id:'maxFocus',name:'Max Focus',type:'maxFocus',effect:10,cost:40},
+  {id:'focusRegen',name:'Focus Regen',type:'focusRegen',effect:1,cost:25},
+];
+
+function TapTrials() {
+  const [gameState, setGameState] = useState(() => {
+    const saved = localStorage.getItem('tapTrials_save');
+    if(saved) { try { return {...INITIAL_STATE,...JSON.parse(saved)} } catch { return INITIAL_STATE; } }
+    return INITIAL_STATE;
+  });
+
+  const [floatingNumbers,setFloatingNumbers]=useState([]);
+  const [screenShake,setScreenShake]=useState(false);
+  const [activeBoss,setActiveBoss]=useState(null);
+  const [comboCount,setComboCount]=useState(0);
+  const [lastTapTime,setLastTapTime]=useState(0);
+  const floatingIdRef = useRef(0);
+  const [activeTab,setActiveTab] = useState('game');
+
+  // Save game
+  useEffect(()=>{
+    const interval = setInterval(()=>{
+      localStorage.setItem('tapTrials_save',JSON.stringify({...gameState,lastOnline:Date.now()}));
+    },5000);
+    return ()=>clearInterval(interval);
+  },[gameState]);
+
+  // Offline progress
+  useEffect(()=>{
+    const offlineTime=(Date.now()-gameState.lastOnline)/1000;
+    if(offlineTime>60 && gameState.autoPower>0){
+      const offlinePower=Math.floor(gameState.autoPower*offlineTime*0.5);
+      if(offlinePower>0){ setGameState(prev=>({...prev,power:prev.power+offlinePower,totalPower:prev.totalPower+offlinePower})); }
+    }
+  },[]);
+
+  // Focus regen
+  useEffect(()=>{
+    const interval=setInterval(()=>{
+      setGameState(prev=>{
+        if(prev.currentModifiers.some(m=>m.id==='no-regen')) return prev;
+        return {...prev,focus:Math.min(prev.maxFocus,prev.focus+prev.focusRegen)};
+      });
+    },1000);
+    return ()=>clearInterval(interval);
+  },[]);
+
+  // Auto power
+  useEffect(()=>{
+    if(gameState.autoPower<=0) return;
+    const interval=setInterval(()=>{
+      setGameState(prev=>{
+        const reducedAuto=prev.currentModifiers.some(m=>m.id==='reduced-auto');
+        const power=reducedAuto?prev.autoPower*0.5:prev.autoPower;
+        return {...prev,power:prev.power+power,totalPower:prev.totalPower+power,trialProgress:prev.trialProgress+power};
+      });
+    },1000);
+    return ()=>clearInterval(interval);
+  },[gameState.autoPower]);
+
+  // Combo decay
+  useEffect(()=>{
+    const interval=setInterval(()=>{ if(Date.now()-lastTapTime>1500)setComboCount(0); },500);
+    return ()=>clearInterval(interval);
+  },[lastTapTime]);
+
+  const getTrialRequirement=(trial)=>{
+    const base=100; const scaling=Math.pow(1.5,trial-1);
+    const resetBonus=1+(gameState.resets*0.1);
+    const beyondMultiplier=gameState.trialsBeyondMode?2.5:1;
+    return Math.floor(base*scaling/resetBonus*beyondMultiplier);
+  };
+
+  const generateTrialModifiers=()=>{
+    if(!gameState.trialsBeyondMode) return [];
+    const allModifiers=[
+      {id:'no-crits',name:'Critical Failure'},
+      {id:'focus-drain',name:'Mental Fatigue'},
+      {id:'reduced-auto',name:'Power Shortage'},
+      {id:'combo-reset',name:'Momentum Loss'},
+      {id:'high-requirement',name:'Excessive Demand'},
+      {id:'no-regen',name:'Exhaustion'},
+    ];
+    const shuffled=[...allModifiers].sort(()=>Math.random()-0.5);
+    return shuffled.slice(0,2);
+  };
+
+  const completeTrialHandler=()=>{
+    setGameState(prev=>{
+      const newTrial=prev.currentTrial+1;
+      const newModifiers=prev.trialsBeyondMode&&newTrial%5===0?generateTrialModifiers():prev.currentModifiers;
+      return {...prev,currentTrial:newTrial,trialProgress:0,highestTrial:Math.max(prev.highestTrial,newTrial),currentModifiers:newModifiers};
+    });
+  };
+
+  const handleTap=useCallback((e)=>{
+    let focusCost=gameState.hardcoreMode?3:1;
+    if(gameState.currentModifiers.some(m=>m.id==='focus-drain')) focusCost*=2;
+    if(gameState.focus<focusCost) return;
+
+    const now=Date.now();
+    const timeSinceLastTap=now-lastTapTime;
+    let newCombo=comboCount;
+    if(timeSinceLastTap<500)newCombo=Math.min(comboCount+1,50);
+    else if(timeSinceLastTap>1500)newCombo=0;
+    setComboCount(newCombo); setLastTapTime(now);
+
+    const critsDisabled=gameState.currentModifiers.some(m=>m.id==='no-crits');
+    const isCrit=!critsDisabled && Math.random()*100<gameState.critChance;
+    const comboMultiplier=1+(newCombo*0.02);
+    let power=gameState.tapPower*comboMultiplier;
+    if(isCrit) power*=gameState.critMultiplier;
+    power=Math.floor(power);
+
+    // Floating numbers at click position
+    const rect=e.currentTarget.getBoundingClientRect();
+    const x=e.clientX-rect.left; const y=e.clientY-rect.top;
+    const id=floatingIdRef.current++;
+    setFloatingNumbers(prev=>[...prev,{id,value:power,x,y,isCrit}]);
+    setTimeout(()=>setFloatingNumbers(prev=>prev.filter(n=>n.id!==id)),1000);
+
+    if(isCrit){ setScreenShake(true); setTimeout(()=>setScreenShake(false),100); }
+
+    setGameState(prev=>({...prev,power:prev.power+power,totalPower:prev.totalPower+power,focus:Math.max(0,prev.focus-focusCost),trialProgress:prev.trialProgress+power,totalTaps:prev.totalTaps+1,totalCrits:prev.totalCrits+(isCrit?1:0)}));
+
+    if(gameState.trialProgress+power>=getTrialRequirement(gameState.currentTrial)){
+      if(gameState.currentTrial%10===0&&!activeBoss){
+        setActiveBoss({trial:gameState.currentTrial,health:100,maxHealth:100,timeLeft:30});
+      } else if(!activeBoss) completeTrialHandler();
+    }
+  },[gameState,comboCount,lastTapTime,activeBoss]);
+
+  const handleBossTap=useCallback(()=>{
+    if(!activeBoss) return;
+    const damage=gameState.tapPower*(1+gameState.resets*0.2);
+    setActiveBoss(prev=>({...prev,health:Math.max(0,prev.health-damage/10)}));
+    if(activeBoss.health-damage/10<=0){ setActiveBoss(null); completeTrialHandler(); }
+  },[activeBoss,gameState.tapPower,gameState.resets]);
+
+  const performReset=()=>{
+    const resetPointsGained=Math.floor(Math.sqrt(gameState.currentTrial));
+    const unlockBeyond=gameState.totalResets+1>=10;
+    setGameState(prev=>({...INITIAL_STATE,resets:prev.resets+1,totalResets:prev.totalResets+1,resetPoints:prev.resetPoints+resetPointsGained,highestTrial:prev.highestTrial,totalTaps:prev.totalTaps,totalCrits:prev.totalCrits,hardcoreMode:prev.hardcoreMode,trialsBeyondMode:unlockBeyond?prev.trialsBeyondMode:false,tapPower:1+(prev.resets+1)*0.5,autoPower:(prev.resets+1)*0.1,achievements:prev.achievements}));
+  };
+
+  const purchaseUpgrade=(upgrade)=>{
+    if(gameState.power<upgrade.cost) return;
+    setGameState(prev=>{
+      const currentLevel=prev.upgrades[upgrade.id]||0;
+      const newState={...prev,power:prev.power-upgrade.cost,upgrades:{...prev.upgrades,[upgrade.id]:currentLevel+1}};
+      switch(upgrade.type){
+        case 'tapPower': newState.tapPower+=upgrade.effect; break;
+        case 'autoPower': newState.autoPower+=upgrade.effect; break;
+        case 'critChance': newState.critChance=Math.min(100,prev.critChance+upgrade.effect); break;
+        case 'critMultiplier': newState.critMultiplier+=upgrade.effect; break;
+        case 'maxFocus': newState.maxFocus+=upgrade.effect; newState.focus+=upgrade.effect; break;
+        case 'focusRegen': newState.focusRegen+=upgrade.effect; break;
+      }
+      return newState;
+    });
+  };
+
+  const toggleBeyond=()=>{ setGameState(prev=>({...prev,trialsBeyondMode:!prev.trialsBeyondMode,currentModifiers:!prev.trialsBeyondMode?generateTrialModifiers():[]})) };
+
+  return (
+    <div className={`min-h-screen flex flex-col relative ${screenShake?'shake':''}`}>
+      {/* Header */}
+      <div className="px-4 pt-4 pb-2">
+        <h1 className="text-2xl font-black bg-gradient-to-r from-violet-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent">TapTrials</h1>
+        <div className="mt-2">Trial: {gameState.currentTrial} | Power: {Math.floor(gameState.power)} | Focus: {Math.floor(gameState.focus)}/{gameState.maxFocus} | Combo: {comboCount}</div>
+        <div className="mt-2 flex gap-2">
+          <button className="px-2 py-1 bg-green-600 rounded" onClick={performReset}>Reset</button>
+          <button className="px-2 py-1 bg-blue-600 rounded" onClick={toggleBeyond}>{gameState.trialsBeyondMode?'End Beyond Mode':'Start Beyond Mode'}</button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex gap-2 px-4 mt-2">
+        <button className={`px-3 py-1 rounded ${activeTab==='game'?'bg-purple-600':'bg-gray-800'}`} onClick={()=>setActiveTab('game')}>Game</button>
+        <button className={`px-3 py-1 rounded ${activeTab==='upgrades'?'bg-purple-600':'bg-gray-800'}`} onClick={()=>setActiveTab('upgrades')}>Upgrades</button>
+        <button className={`px-3 py-1 rounded ${activeTab==='stats'?'bg-purple-600':'bg-gray-800'}`} onClick={()=>setActiveTab('stats')}>Stats</button>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex items-center justify-center relative px-4">
+        {activeTab==='game' && (
+          <>
+            <button className="px-20 py-20 bg-purple-700 rounded-full text-white font-bold text-2xl" onClick={handleTap}>TAP</button>
+            {floatingNumbers.map(n=>(
+              <div key={n.id} className="floating" style={{left:n.x,top:n.y,color:n.isCrit?'yellow':'white'}}>+{n.value}</div>
+            ))}
+          </>
+        )}
+
+        {activeTab==='upgrades' && (
+          <div className="w-full grid grid-cols-2 gap-2 mt-4">
+            {UPGRADE_LIST.map(u=>(
+              <div key={u.id} className="p-2 bg-gray-800 rounded flex justify-between items-center">
+                <div>{u.name} (Lv {gameState.upgrades[u.id]||0})</div>
+                <button className="px-2 py-1 bg-green-600 rounded" onClick={()=>purchaseUpgrade(u)}>Buy ({u.cost})</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {activeTab==='stats' && (
+          <div className="text-left mt-4">
+            <div>Total Taps: {gameState.totalTaps}</div>
+            <div>Total Crits: {gameState.totalCrits}</div>
+            <div>Highest Trial: {gameState.highestTrial}</div>
+            <div>Resets: {gameState.resets}</div>
+            <div>Reset Points: {gameState.resetPoints}</div>
+          </div>
+        )}
+      </div>
+
+      {/* Boss Overlay */}
+      {activeBoss && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-70 flex-col">
+          <div className="text-xl font-bold mb-2">Boss Trial {activeBoss.trial}</div>
+          <div className="w-64 h-4 bg-gray-700 rounded overflow-hidden">
+            <div className="h-4 bg-red-600" style={{width:`${(activeBoss.health/activeBoss.maxHealth)*100}%`}}></div>
+          </div>
+          <button className="mt-4 px-6 py-2 bg-red-700 rounded" onClick={handleBossTap}>Attack Boss</button>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<TapTrials />);
+</script>
+</body>
+</html>
